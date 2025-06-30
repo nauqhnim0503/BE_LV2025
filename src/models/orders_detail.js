@@ -3,11 +3,22 @@ const { Model } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
   class Orders_detail extends Model {
-    /**
-     * Helper method for defining associations.
-     */
-    
-  }
+    static associate(models) {
+    // Một chi tiết đơn hàng thuộc về một đơn hàng
+    Orders_detail.belongsTo(models.Orders, {
+      foreignKey: 'order_id',
+      as: 'order',
+    });
+    Orders_detail.belongsTo(models.Products, {
+      foreignKey: 'product_id',
+      as: 'product'
+    });
+    Orders_detail.belongsTo(models.Product_variants, {
+      foreignKey: 'product_variant_id',
+      as: 'product_variant'
+    });
+  }    
+}
 
   Orders_detail.init(
     {
@@ -17,8 +28,12 @@ module.exports = (sequelize, DataTypes) => {
         autoIncrement: true,
       },
       order_id: {
-        type: DataTypes.INTEGER,
+        type: DataTypes.STRING,
         allowNull: true,
+      },
+      product_id: {               
+        type: DataTypes.INTEGER,
+        allowNull: false,
       },
       product_variant_id: {
         type: DataTypes.INTEGER,

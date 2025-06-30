@@ -38,7 +38,8 @@ module.exports = (sequelize, DataTypes) => {
       },
       used_count: {
         type: DataTypes.INTEGER,
-        allowNull: true,
+        allowNull: false,
+        defaultValue: 0,
       },
       start_date: {
         type: DataTypes.DATE,

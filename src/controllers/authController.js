@@ -28,7 +28,10 @@ const registerController = async (req, res, next) => {
         })
     } catch (error) {
         console.log(error)
-        next(error)
+        return res.status(500).json({
+        status: 'false',
+        message: 'Lỗi server: ' + error.message,
+        });
     }
 }
 const loginController = async (req, res, next) => {
@@ -39,7 +42,7 @@ const loginController = async (req, res, next) => {
         if (!isMatch || !existedUser) {
             return res.status(400).json({
                 status: 'false',
-                message: 'tai khoan hoac mat khau khong chinh sac'
+                message: 'Tài khoản hoặc mật khẩu không chính xác'
             })
         }
         const users = pick(existedUser, ['id', 'name'])
@@ -49,7 +52,7 @@ const loginController = async (req, res, next) => {
         )
         return res.status(200).json({
             status: 'true',
-            message: 'dang nhap thanh cong',
+            message: 'Đăng nhập thành công',
             data: users,
             token
         })
@@ -67,7 +70,7 @@ const adminLoginController = async (req, res, next) => {
         if (!isMatch || !existedUser) {
             return res.status(400).json({
                 status: 'false',
-                message: 'tai khoan hoac mat khau khong chinh sac'
+                message: 'Tài khoản hoặc mật khẩu không chính xác'
             })
         }
         const admins = pick(existedUser, ['id', 'name'])
@@ -77,7 +80,7 @@ const adminLoginController = async (req, res, next) => {
         )
         return res.status(200).json({
             status: 'true',
-            message: 'dang nhap thanh cong',
+            message: 'Đăng nhập thành công',
             data: admins,
             token
         })

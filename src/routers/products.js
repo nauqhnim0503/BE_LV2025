@@ -6,11 +6,11 @@ loaiProductsRouter.get('/',danhSachProducts)
 loaiProductsRouter.get('/:id', getProductById);
 loaiProductsRouter.post('/',upload.fields([
   { name: 'url', maxCount: 1 },              // ảnh chính
-  { name: 'sub_images', maxCount: 10 },    // ảnh phụ (mảng)
+  { name: 'sub_images', maxCount: 4 },    // ảnh phụ (mảng)
 ]),createProducts)
 loaiProductsRouter.put('/:id',upload.fields([
   { name: 'url', maxCount: 1 },              // ảnh chính
-  { name: 'sub_images', maxCount: 10 },    // ảnh phụ (mảng)
+  { name: 'sub_images', maxCount: 4 },    // ảnh phụ (mảng)
 ]),updatedProduct)
 loaiProductsRouter.patch('/:id',trangThaiSanPham)
 module.exports=loaiProductsRouter;

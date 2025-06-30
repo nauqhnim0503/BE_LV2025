@@ -1,286 +1,388 @@
-const crypto = require('crypto');
-const moment = require('moment');
-const qs = require('qs');
-const {Orders_detail,Orders, sequelize}=require('../models');
+// Import các thư viện cần thiết
+const crypto = require('crypto'); // Thư viện mã hóa dùng để tạo chữ ký bảo mật
+const moment = require('moment'); // Thư viện xử lý thời gian
+const qs = require('qs'); // Thư viện để xử lý chuỗi query
+const { Orders_detail, Orders, Product_variants,Products, sequelize ,Sizes,Colors,Discount_codes} = require('../models'); // Import model từ Sequelize
+const { includes } = require('lodash');
 
-// VNPAY Configuration - thay đổi theo thông tin của bạn
-const vnpayConfig = {
-    vnp_TmnCode: 'Y23UTK8D', // Mã website của merchant trên VNPAY
-    vnp_HashSecret: 'ZQ7X0L2ETEVQ8WQJRAT3B15TNEO7XMXT', // Chuỗi bí mật
-    vnp_Url: 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html', // URL thanh toán VNPAY (sandbox)
-    vnp_ReturnUrl: 'http://localhost:3000/api/vnpay/return', // URL trả về sau thanh toán
+// Cấu hình thông tin VNPAY
+const VNPAY = {
+    tmnCode: 'Y23UTK8D', // Mã terminal được VNPAY cung cấp
+    hashSecret: 'ZQ7X0L2ETEVQ8WQJRAT3B15TNEO7XMXT', // Secret key để tạo chữ ký
+    url: 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html', // URL trang thanh toán sandbox
+    returnUrl: 'http://localhost:3000/orders/vnpay/return', // URL callback sau khi thanh toán
 };
 
-// Hàm sắp xếp object
-const sortObjects = (obj) => {
-    const sorted = {};
-    const str = [];
-    let key;
-    // Use Object.keys to iterate over own properties, works for null-prototype objects too
-    // or ensure obj is a plain object before calling this function.
-    // For this case, we'll assume obj might be null-prototype and handle it safely.
-    const keys = Object.keys(obj); 
-    for (const k of keys) {
-        str.push(encodeURIComponent(k));
-    }
-    str.sort();
-    for (key = 0; key < str.length; key++) {
-        // When using Object.keys, str[key] is already the key name
-        const originalKey = decodeURIComponent(str[key]);
-        sorted[str[key]] = encodeURIComponent(obj[originalKey]).replace(/%20/g, "+");
-    }
-    return sorted;
-};
-// A more robust sortObject that handles any object type for keys
-const sortObjectRobust = (obj) => {
-    let sorted = {};
-    let str = [];
-    let key;
-    for (key in obj) {
-        // Check if the property is directly on the object
-        // For null-prototype objects, Object.prototype.hasOwnProperty.call is safer
-        if (Object.prototype.hasOwnProperty.call(obj, key)) {
-            str.push(encodeURIComponent(key));
+// Bộ nhớ tạm để lưu đơn hàng chờ thanh toán (production nên dùng Redis)
+const pendingOrders = new Map();
+
+// Hàm kiểm tra tồn kho
+const validateStock = async (items, transaction) => {
+    for (const item of items) {
+        const variant = await Product_variants.findByPk(item.product_variant_id, { transaction });
+        if (!variant) {
+            throw new Error(`Không tìm thấy sản phẩm với ID: ${item.product_variant_id}`);
+        }
+        if (variant.stock_quantity < item.quantity) {
+            throw new Error(`Sản phẩm ID ${item.product_variant_id} không đủ số lượng. Còn lại: ${variant.stock_quantity}, yêu cầu: ${item.quantity}`);
         }
     }
-    str.sort();
-    for (key = 0; key < str.length; key++) {
-        sorted[str[key]] = encodeURIComponent(obj[decodeURIComponent(str[key])]).replace(/%20/g, "+");
-    }
-    return sorted;
 };
 
-
-
-// Hàm tạo URL thanh toán VNPAY
-const createVNPayUrl = (orderId, amount, orderInfo, ipAddr) => {
-    const date = new Date();
-    const createDate = moment(date).format('YYYYMMDDHHmmss');
-    
-    let vnp_Params = {};
-    vnp_Params['vnp_Version'] = '2.1.0';
-    vnp_Params['vnp_Command'] = 'pay';
-    vnp_Params['vnp_TmnCode'] = vnpayConfig.vnp_TmnCode;
-    vnp_Params['vnp_Locale'] = 'vn';
-    vnp_Params['vnp_CurrCode'] = 'VND';
-    vnp_Params['vnp_TxnRef'] = orderId;
-    vnp_Params['vnp_OrderInfo'] = orderInfo;
-    vnp_Params['vnp_OrderType'] = 'other';
-    vnp_Params['vnp_Amount'] = amount * 100; // VNPAY yêu cầu amount * 100
-    vnp_Params['vnp_ReturnUrl'] = vnpayConfig.vnp_ReturnUrl;
-    vnp_Params['vnp_IpAddr'] = ipAddr;
-    vnp_Params['vnp_CreateDate'] = createDate;
-    
-    // Sắp xếp params theo alphabet
-    vnp_Params = sortObject(vnp_Params);
-    
-    const signData = qs.stringify(vnp_Params, { encode: false });
-    const hmac = crypto.createHmac("sha512", vnpayConfig.vnp_HashSecret);
-    const signed = hmac.update(Buffer.from(signData, 'utf-8')).digest("hex");
-    vnp_Params['vnp_SecureHash'] = signed;
-    
-    return vnpayConfig.vnp_Url + '?' + qs.stringify(vnp_Params, { encode: false });
+// Hàm trừ số lượng tồn kho
+const decrementStock = async (items, transaction) => {
+    await Promise.all(items.map(item =>
+        Product_variants.decrement('stock_quantity', {
+            by: item.quantity,
+            where: { id: item.product_variant_id },
+            transaction
+        })
+    ));
 };
 
-// Hàm sắp xếp object
+// Tạo bản ghi đơn hàng và chi tiết đơn hàng
+const createOrderRecord = async (orderId, orderData, items, status, transaction, extraFields = {}) => {
+    const order = await Orders.create({
+        id: orderId,
+        ...orderData,
+        status,
+        ...extraFields
+    }, { transaction });
+
+    await Orders_detail.bulkCreate(
+        items.map(item => ({ order_id: orderId, ...item })),
+        { transaction }
+    );
+
+    return order;
+};
+
+// Sắp xếp object và encode theo yêu cầu VNPAY
 const sortObject = (obj) => {
     const sorted = {};
-    const str = [];
-    let key;
-    for (key in obj) {
-        if (obj.hasOwnProperty(key)) {
-            str.push(encodeURIComponent(key));
-        }
-    }
-    str.sort();
-    for (key = 0; key < str.length; key++) {
-        sorted[str[key]] = encodeURIComponent(obj[str[key]]).replace(/%20/g, "+");
-    }
+    Object.keys(obj).sort().forEach(key => {
+        sorted[encodeURIComponent(key)] = encodeURIComponent(obj[key]).replace(/%20/g, '+');
+    });
     return sorted;
 };
 
-const createOrder = async (req, res, next) => {
+// Tạo chữ ký HMAC SHA512 từ dữ liệu đầu vào
+const createSignature = (data) => {
+    return crypto.createHmac('sha512', VNPAY.hashSecret)
+        .update(Buffer.from(data, 'utf-8'))
+        .digest('hex');
+};
+
+// Lấy IP của client
+const getClientIP = (req) => {
+    return req.headers['x-forwarded-for'] || req.connection.remoteAddress || '127.0.0.1';
+};
+
+// Tạo URL thanh toán VNPAY
+const createVNPayUrl = (orderId, amount, ipAddr) => {
+    let params = {vnp_Version: '2.1.0',
+        vnp_Command: 'pay',
+        vnp_TmnCode: VNPAY.tmnCode,
+        vnp_Locale: 'vn',
+        vnp_CurrCode: 'VND',
+        vnp_TxnRef: orderId,
+        vnp_OrderInfo: `Thanh toan don hang ${orderId}`,
+        vnp_OrderType: 'other',
+        vnp_Amount: amount * 100,
+        vnp_ReturnUrl: VNPAY.returnUrl,
+        vnp_IpAddr: ipAddr,
+        vnp_CreateDate: moment().format('YYYYMMDDHHmmss'),
+    };
+
+    params = sortObject(params);
+    const signData = qs.stringify(params, { encode: false });
+    params.vnp_SecureHash = createSignature(signData);
+
+    return `${VNPAY.url}?${qs.stringify(params, { encode: false })}`;
+};
+
+// Xử lý thanh toán COD (thanh toán khi nhận hàng)
+const handleCODPayment = async (orderId, orderData, items, res) => {
     const t = await sequelize.transaction();
     try {
-        const { 
-            user_id, 
-            name, 
-            address, 
-            phone, 
-            discount_code_id, 
-            subtotal, 
-            discount_amount, 
-            total_amount, 
-            payment_method, 
-            items 
-        } = req.body;
-        
-        const discountId = discount_code_id === '' ? null : discount_code_id;
-        let status = 'Pending'; // mặc định
-        
-        if (payment_method === 'COD') {
-            status = 'Pending';
-        } else if (payment_method === 'VNPAY' || payment_method === 'MOMO') {
-            status = 'Confirm'; // chưa thanh toán, đợi xác nhận từ cổng thanh toán
-        } else {
-            return res.status(400).json({
-                success: false,
-                message: 'Vui lòng chọn phương thức thanh toán COD, VNPAY hoặc MOMO',
-            });
+        await validateStock(items, t);
+        const order = await createOrderRecord(orderId, orderData, items, 'Chờ xác nhận', t);
+        if (orderData.discount_code_id) {
+          await Discount_codes.increment('used_count', {
+            by: 1,
+            where: { id: orderData.discount_code_id },
+            transaction: t
+          });
         }
-
-        const orderId = `ORDER_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-
-        // Tạo đơn hàng
-        const orders = await Orders.create({
-            id: orderId,
-            user_id,
-            name,
-            address,
-            phone,
-            discount_code_id: discountId,
-            subtotal,
-            discount_amount,
-            total_amount,
-            status,
-            payment_method
-        }, { transaction: t });
-
-        // Tạo chi tiết đơn hàng
-        for (let item of items) {
-            const { product_variant_id, quantity, price } = item;
-            await Orders_detail.create({
-                order_id: orderId,
-                product_variant_id,
-                quantity,
-                price
-            }, { transaction: t });
-        }
-
+        await decrementStock(items, t);
         await t.commit();
-
-        // Xử lý thanh toán
-        if (payment_method === 'VNPAY') {
-            // Lấy IP address của client
-            const ipAddr = req.headers['x-forwarded-for'] ||
-                          req.connection.remoteAddress ||
-                          req.socket.remoteAddress ||
-                          (req.connection.socket ? req.connection.socket.remoteAddress : null) ||
-                          '127.0.0.1';
-
-            // Tạo URL thanh toán VNPAY
-            const orderInfo = `Thanh toan don hang ${orderId}`;
-            const paymentUrl = createVNPayUrl(orderId, total_amount, orderInfo, ipAddr);
-
-            return res.status(200).json({
-                success: true,
-                message: 'Order tạo thành công',
-                data: orders,
-                payment_url: paymentUrl // URL để redirect đến VNPAY
-            });
-        } else if (payment_method === 'MOMO') {
-            // TODO: Implement MOMO payment integration
-            return res.status(200).json({
-                success: true,
-                message: 'Order tạo thành công - MOMO payment coming soon',
-                data: orders
-            });
-        } else {
-            // COD
-            return res.status(200).json({
-                success: true,
-                message: 'Order tạo thành công',
-                data: orders
-            });
-        }
-
+        return res.json({ success: true, message: 'Đặt hàng thành công', data: order });
     } catch (error) {
         await t.rollback();
-        console.error(error);
-        return res.status(500).json({ 
-            success: false,
-            error: error.message 
-        });
+        throw error;
     }
 };
 
-// Hàm xử lý callback từ VNPAY
-const vnpayReturn = async (req, res) => {
+// Xử lý thanh toán qua VNPAY
+const handleVNPayPayment = async (orderId, orderData, items, req, res) => {
+    const t = await sequelize.transaction();
     try {
-        console.log(req.query);
-       
-        let vnp_Params =req.query;
-        const secureHash = vnp_Params['vnp_SecureHash'];
+        await validateStock(items, t);
+        await t.commit();
 
-        delete vnp_Params['vnp_SecureHash'];
-        delete vnp_Params['vnp_SecureHashType'];
+        pendingOrders.set(orderId, { ...orderData, items, created_at: Date.now() });
+        setTimeout(() => pendingOrders.delete(orderId), 15 * 60 * 1000); // Xóa sau 15 phút
 
-        vnp_Params = sortObjectRobust(vnp_Params);
-        console.log('DDAY LAF PRAM',vnp_Params)
-
-        const signData = qs.stringify(vnp_Params, { encode: false });
-        const hmac = crypto.createHmac("sha512", vnpayConfig.vnp_HashSecret);
-        const signed = hmac.update(Buffer.from(signData, 'utf-8')).digest("hex");
-
-        if (secureHash === signed) {
-            const orderId = vnp_Params['vnp_TxnRef'];
-            const responseCode = vnp_Params['vnp_ResponseCode'];
-
-            if (responseCode === '00') {
-                // Thanh toán thành công
-                await Orders.update(
-                    { 
-                        status: 'CONFIRM',
-                        payment_date: new Date(),
-                        vnpay_transaction_id: vnp_Params['vnp_TransactionNo']
-                    },
-                    { where: { id: orderId } }
-                );
-
-                return res.status(200).json({
-                    success: true,
-                    message: 'Thanh toán thành công',
-                    order_id: orderId
-                });
-            } else {
-                // Thanh toán thất bại
-                await Orders.update(
-                    { status: 'CANCEL' },
-                    { where: { id: orderId } }
-                );
-
-                return res.status(400).json({
-                    success: false,
-                    message: 'Thanh toán thất bại',
-                    order_id: orderId
-                });
-            }
-        //     else {
-        //         // Thanh toán thất bại -> XÓA đơn hàng và chi tiết
-        //         await Orders_detail.destroy({ where: { order_id: orderId } });
-        //         await Orders.destroy({ where: { id: orderId } });
-            
-        //         return res.status(400).json({
-        //             success: false,
-        //             message: 'Thanh toán thất bại - đơn hàng đã bị xóa',
-        //             order_id: orderId
-        //         });
-        } else {
-            return res.status(400).json({
-                success: false,
-                message: 'Chữ ký không hợp lệ'
-            });
-        }
-    } catch (error) {
-        console.error(error);
-        return res.status(500).json({
-            success: false,
-            error: error.message
+        const paymentUrl = createVNPayUrl(orderId, orderData.total_amount, getClientIP(req));
+        return res.json({
+            success: true,
+            message: 'Vui lòng thanh toán để hoàn tất đơn hàng',
+            payment_url: paymentUrl,
+            order_id: orderId
         });
+    } catch (error) {
+        await t.rollback();
+        throw error;
     }
 };
 
-module.exports = {
+// Controller chính để tạo đơn hàng
+const createOrder = async (req, res) => {
+  console.log('🔥 Order body:', req.body);
+    try {
+        const {
+            user_id, name, address, phone, discount_code_id,
+            subtotal, discount_amount, total_amount, payment_method, items
+        } = req.body;
+
+        const orderId = `ORDER_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+        const orderData = {
+            user_id, name, address, phone,
+            discount_code_id: discount_code_id || null,
+            subtotal, discount_amount, total_amount, payment_method
+        };
+
+        if (payment_method === 'COD') {
+          console.log("➡️ COD payment được chọn");
+            return await handleCODPayment(orderId, orderData, items, res);
+        }
+
+        if (payment_method === 'VNPAY') {
+          console.log("➡️ VNPAY payment được chọn");
+            return await handleVNPayPayment(orderId, orderData, items, req, res);
+        }
+        console.warn("⚠️ Không khớp phương thức thanh toán:", payment_method);
+        return res.status(400).json({ success: false, message: 'Phương thức thanh toán không hợp lệ' });
+    } catch (error) {res.status(500).json({ success: false, error: error.message });
+    }
+};
+
+// Xử lý callback từ VNPAY sau thanh toán
+const vnpayReturn = async (req, res) => {
+  console.log('📥 VNPAY callback nhận được:', req.query);
+    try {
+        const params = { ...req.query };
+        const secureHash = params.vnp_SecureHash;
+        delete params.vnp_SecureHash;
+        delete params.vnp_SecureHashType;
+
+        const sortedParams = sortObject(params);
+        const signData = qs.stringify(sortedParams, { encode: false });
+        const signature = createSignature(signData);
+
+        const frontendUrl = 'http://localhost:8080/vnpay-return';
+
+        if (secureHash !== signature) {
+          return res.redirect(`${frontendUrl}?status=fail&message=Chữ+ký+không+hợp+lệ`);
+        }
+
+        const orderId = params.vnp_TxnRef;
+        const isSuccess = params.vnp_ResponseCode === '00';
+
+        if (!isSuccess) {
+          pendingOrders.delete(orderId);
+          return res.redirect(`${frontendUrl}?status=fail&vnp_TxnRef=${orderId}&message=Thanh+toán+thất+bại`);
+
+        }
+
+        const orderData = pendingOrders.get(orderId);
+        if (!orderData) {
+          return res.redirect(`${frontendUrl}?status=fail&vnp_TxnRef=${orderId}&message=Không+tìm+thấy+thông+tin+đơn+hàng`);
+        }
+
+        const t = await sequelize.transaction();
+        try {
+            await validateStock(orderData.items, t);
+            const order = await createOrderRecord(
+                orderId,
+                orderData,
+                orderData.items,
+                'Đã xác nhận',
+                t,
+                {
+                    payment_method: 'VNPAY',
+                    payment_date: new Date(),
+                    vnpay_transaction_id: params.vnp_TransactionNo
+                }
+            );
+            if (orderData.discount_code_id) {
+              await Discount_codes.increment('used_count', {
+                by: 1,
+                where: { id: orderData.discount_code_id },
+                transaction: t
+              });
+            }
+
+            await decrementStock(orderData.items, t);
+            await t.commit();
+
+            pendingOrders.delete(orderId);
+
+            return res.redirect(`${frontendUrl}?status=success&vnp_TxnRef=${orderId}&message=Thanh+toán+thành+công`);
+        } catch (error) {
+          await t.rollback();
+          return res.redirect(`${frontendUrl}?status=fail&vnp_TxnRef=${orderId}&message=Lỗi+hệ+thống`);
+        }
+
+    } catch (error) {
+      console.error('🔥 Toàn bộ lỗi vnpayReturn:', error);
+      return res.redirect(`${frontendUrl}?status=fail&vnp_TxnRef=${orderId}&message=Lỗi+hệ+thống`);
+    }
+};
+//get danh sach order
+const danhSachOrder = async (req, res) => {
+  try {
+    const danhsach = await Orders.findAll({
+      include: [
+        {
+          model: Orders_detail,
+          as: 'orderItems',
+          include: [
+            {
+              model: Product_variants,
+              as: 'product_variant',
+              attributes: ['id', 'product_id', ],
+              include: [
+            {
+              model: Products,
+              as: 'product',
+              attributes: ['name'],
+            },
+            {
+              model: Sizes,
+              as: 'sizes',
+              attributes: ['name'], 
+            },
+            {
+              model: Colors,
+              as: 'colors',
+              attributes: ['name'], 
+            },
+          ]
+            }
+          ]
+        }
+      ],
+      order: [['createdAt', 'DESC']]
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Lấy danh sách order thành công",
+      data: danhsach
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+const updateOrderStatus = async (req, res) => {
+    const { id } = req.params;
+    const status = req.body?.status || req.query?.status;
+    const allowedStatus = ['Chờ xác nhận', 'Đã xác nhận', 'Đang vận chuyển', 'Đã giao', 'Đã hủy', 'Thanh toán thất bại'];
+
+    if (!allowedStatus.includes(status)) {
+        return res.status(400).json({ success: false, message: 'Trạng thái không hợp lệ' });
+    }
+
+    try {
+        const order = await Orders.findByPk(id);
+        if (!order) return res.status(404).json({ success: false, message: 'Không tìm thấy đơn hàng' });
+
+        order.status = status;
+        await order.save();
+
+        res.json({ success: true, message: 'Cập nhật trạng thái thành công', data: order });
+    } catch (error) {res.status(500).json({ success: false, error: error.message });
+    }
+};
+const cancelOrder = async (req, res) => {
+  const order_id = req.params.id; // ✅ Lấy ID đơn hàng từ URL params, ví dụ: /orders/:id/cancel
+  const t = await sequelize.transaction(); // 🔁 Bắt đầu một transaction để đảm bảo thao tác CSDL diễn ra an toàn
+
+  try {
+    // 🔍 Tìm đơn hàng theo ID, đồng thời lấy danh sách sản phẩm chi tiết trong đơn
+    const order = await Orders.findByPk(order_id, {
+      include: [{ model: Orders_detail, as: 'orderItems' }],
+      transaction: t
+    });
+
+    // ❌ Nếu không tìm thấy đơn hàng
+    if (!order) {
+      await t.rollback();
+      return res.status(404).json({
+        success: false,
+        message: 'Đơn hàng không tồn tại'
+      });
+    }
+
+    // ⚠️ Chỉ cho huỷ đơn khi đơn còn ở trạng thái "Chờ xác nhận"
+    if (order.status !== 'Chờ xác nhận') {
+      await t.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `Đơn hàng không thể huỷ ở trạng thái hiện tại: ${order.status}`
+      });
+    }
+
+    // ♻️ Duyệt từng sản phẩm trong đơn để hoàn trả số lượng về kho
+    for (const item of order.orderItems) {
+      console.log("Huỷ đơn → hoàn kho:", {
+        variantId: item.product_variant_id,
+        quantity: item.quantity
+      });
+
+      // 🔄 Tăng tồn kho của biến thể sản phẩm tương ứng
+      await Product_variants.increment(
+        { stock_quantity: item.quantity },
+        { where: { id: item.product_variant_id }, transaction: t }
+      );
+    }
+
+    // ✅ Cập nhật trạng thái đơn hàng thành "Đã huỷ"
+    order.status = 'Đã huỷ';
+    await order.save({ transaction: t });
+
+    // 💾 Commit transaction nếu không có lỗi
+    await t.commit();
+    return res.json({ success: true, message: 'Đã huỷ đơn hàng thành công' });
+
+  } catch (error) {
+    // ❗ Có lỗi xảy ra → rollback
+    await t.rollback();
+    console.error("Lỗi huỷ đơn:", error);
+    return res.status(500).json({ success: false, message: 'Lỗi khi huỷ đơn hàng' });
+  }
+};
+// Export các controller
+module.exports =
+{
     createOrder,
-    vnpayReturn
+    vnpayReturn,
+    danhSachOrder,
+    updateOrderStatus,
+    cancelOrder
 };
