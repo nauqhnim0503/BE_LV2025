@@ -14,7 +14,21 @@ const danhSachDiscount_codes = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
-
+const danhSachDiscount_codes_user = async (req, res) => {
+  try {
+    const danhsach = await Discount_codes.findAll({
+      where: { is_active: true }
+    });
+    return res.status(200).json({
+      success: true,
+      message: "Lấy danh sách mã giảm giá đang active (user)",
+      data: danhsach,
+    });
+  } catch (error) {
+    console.log(error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
 // Thêm mã giảm giá
 const themDiscount_code = async (req, res) => {
   try {
@@ -169,6 +183,7 @@ const trangThaiDiscout = async (req, res, next) => {
 };
 module.exports = {
   danhSachDiscount_codes,
+  danhSachDiscount_codes_user,
   themDiscount_code,
   suaDiscount_code,
   getDiscountById,

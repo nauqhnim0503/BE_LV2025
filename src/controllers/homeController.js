@@ -157,7 +157,8 @@ const productAll = async (req, res, next) => {
       ],
       order,
       offset,
-      limit
+      limit,
+      distinct: true 
     });
 
     return res.status(200).json({

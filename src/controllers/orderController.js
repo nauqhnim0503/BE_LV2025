@@ -363,7 +363,7 @@ const cancelOrder = async (req, res) => {
     }
 
     // ✅ Cập nhật trạng thái đơn hàng thành "Đã huỷ"
-    order.status = 'Đã huỷ';
+    order.status = 'Đã hủy';
     await order.save({ transaction: t });
 
     // 💾 Commit transaction nếu không có lỗi
