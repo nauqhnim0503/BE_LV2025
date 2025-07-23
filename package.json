@@ -10,7 +10,7 @@
     "jsonwebtoken": "^9.0.2",
     "lodash": "^4.17.21",
     "morgan": "^1.10.0",
-    "multer": "^2.0.0",
+    "multer": "^2.0.2",
     "multer-storage-cloudinary": "^4.0.0",
     "mysql2": "^3.14.1",
     "nodemailer": "^7.0.5",

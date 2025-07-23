@@ -15,10 +15,16 @@ const homeRouter=require('./src/routers/homeRouter');
 const loaiUserRouter=require('./src/routers/users');
 const loaiRatingRouter=require('./src/routers/rating');
 
+const reelRouter = require('./src/routers/reelRouter');
+
 app.use(cors());
 app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({extended:true}));
+
+app.use('/uploads', express.static('uploads'));
+app.use('/api/reels', reelRouter);
+
 app.use('/categories',loaiCategoriRouter);
 app.use('/products',loaiProductsRouter);
 app.use('/brands',loaiBrandsRouter);
