@@ -1,3 +1,4 @@
+const { min } = require('lodash');
 const { Discount_codes } = require('../models');
 
 // Lấy danh sách mã giảm giá
@@ -46,6 +47,12 @@ const themDiscount_code = async (req, res) => {
     const existingDiscout = await Discount_codes.findOne({ where: { code } });
     if (existingDiscout) {
       return res.status(400).json({ message: 'Tên ma giam gia đã tồn tại' });
+    }
+    if(discount_type === 'fixed' && discount_value > min_order_value) {
+      return res.status(400).json({
+        success: false,
+        message: 'Giá trị giảm giá không thể lớn hơn giá trị đơn hàng tối thiểu',
+      });
     }
     const newCode = await Discount_codes.create({
       code,
@@ -117,9 +124,13 @@ const suaDiscount_code = async (req, res) => {
         });
       }
     }
-
+    if (req.body.discount_type === 'fixed' && req.body.discount_value > req.body.min_order_value) {
+      return res.status(400).json({
+        success: false,
+        message: 'Giá trị giảm không được lớn hơn giá trị đơn hàng tối thiểu',
+      });
+    }
     await code.update(req.body);
-
     return res.status(200).json({
       success: true,
       message: "Cập nhật mã giảm giá thành công",

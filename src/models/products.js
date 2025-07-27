@@ -21,13 +21,9 @@ module.exports = (sequelize, DataTypes) => {
           Products.hasMany(models.Product_variants, {
             foreignKey: 'product_id',
             as: 'product_variants'
-          });
-         
-          
+          });       
     }
-
   }
-
   Products.init(
     {
       id: {
