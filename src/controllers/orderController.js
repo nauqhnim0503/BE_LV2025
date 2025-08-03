@@ -24,7 +24,7 @@ const validateStock = async (items, transaction) => {
             throw new Error(`Không tìm thấy sản phẩm với ID: ${item.product_variant_id}`);
         }
         if (variant.stock_quantity < item.quantity) {
-            throw new Error(`Sản phẩm ID ${item.product_variant_id} không đủ số lượng. Còn lại: ${variant.stock_quantity}, yêu cầu: ${item.quantity}`);
+            throw new Error(`Sản phẩm không đủ số lượng. Còn lại: ${variant.stock_quantity}`);
         }
     }
 };
@@ -173,8 +173,16 @@ const createOrder = async (req, res) => {
         }
         console.warn("⚠️ Không khớp phương thức thanh toán:", payment_method);
         return res.status(400).json({ success: false, message: 'Phương thức thanh toán không hợp lệ' });
-    } catch (error) {res.status(500).json({ success: false, error: error.message });
-    }
+    } catch (error) {
+        console.error('🔥 Lỗi khi đặt hàng:', error.message);
+
+        // Kiểm tra lỗi liên quan đến tồn kho
+        if (error.message.includes('không đủ số lượng')) {
+          return res.status(400).json({ success: false, message: error.message });
+        }
+      
+        return res.status(500).json({ success: false, message: 'Lỗi hệ thống' });
+      }
 };
 
 // Xử lý callback từ VNPAY sau thanh toán

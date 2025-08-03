@@ -87,14 +87,22 @@ const productAll = async (req, res, next) => {
       order.push(['promotional', sortPrice]);
     }
     // Tìm kiếm theo tên
-    if (keyword) {whereCondition.name = { [Op.like]: `%${keyword}%` };
+    // if (keyword) {whereCondition.name = { [Op.like]: `%${keyword}%` };
+    // }
+    if (keyword) {
+      whereCondition[Op.or] = [
+        { name: { [Op.like]: `%${keyword}%` } },
+        // { promotional: { [Op.like]: `%${keyword}%` } },
+        // { description: { [Op.like]: `%${keyword}%` } }
+      ];
     }
     // if(keypromotions){
-    //   whereCondition.promotional={[Op.like]:`%${keypromotions}`};
+    //   whereCondition.promotional={[Op.like]:`%${keypromotions}%`};
     // }
-    // if(keyDescription){
-    //   whereCondition.description={[Op.like]:`%${keyDescription}`}
-    // }
+  //   if (keyDescription) {
+  //   whereCondition.description = { [Op.like]: `%${keyDescription}%` };
+  // }
+
     // const sortPromotional=req.query.sortPromotional;
     // if(sortPromotional==='asc'||sortPromotional==='desc'){
     //   order.push(['promotional',sortPromotional])
